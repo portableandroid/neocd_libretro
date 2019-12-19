@@ -16,6 +16,10 @@
 #include "stringlist.h"
 #include "timeprofiler.h"
 
+#ifdef PORTANDROID
+#include "emu_retro.h"
+#endif
+
 struct KnownBiosListEntry
 {
     const char* filename;
@@ -105,7 +109,10 @@ static const uint8_t padMap2[] = {
 
 // Retroarch's system directory
 const char* systemDirectory = nullptr;
-
+#ifdef PORTANDROID
+// Retroarch' save directory
+const char* saveDirectory = nullptr;
+#endif
 // Collection of callbacks to the things we need
 LibretroCallbacks libretro = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 
@@ -364,12 +371,27 @@ static bool loadBIOS()
     }
 
     size_t reallyRead;
-
+#ifdef PORTANDROID
+	if(cb_settings.bios_path){
+		if (!fileRead(cb_settings.bios_path, neocd.memory.rom, Memory::ROM_SIZE, &reallyRead))
+		{
+			LOG(LOG_ERROR, "Could not load BIOS %s\n", cb_settings.bios_path);
+			return false;
+		}
+	}else{
+	    if (!fileRead(biosList[biosIndex].filename, neocd.memory.rom, Memory::ROM_SIZE, &reallyRead))
+	    {
+	        LOG(LOG_ERROR, "Could not load BIOS %s\n", biosList[biosIndex].filename.c_str());
+	        return false;
+	    }
+	}
+#else
     if (!fileRead(biosList[biosIndex].filename, neocd.memory.rom, Memory::ROM_SIZE, &reallyRead))
     {
         LOG(LOG_ERROR, "Could not load BIOS %s\n", biosList[biosIndex].filename.c_str());
         return false;
     }
+#endif
 
     if (reallyRead < Memory::ROM_SIZE)
     {
@@ -774,7 +796,10 @@ void retro_init(void)
     
     // Get the system directory 
     libretro.environment(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &systemDirectory);
-
+#ifdef PORTANDROID
+    // Get the save directory 
+    libretro.environment(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saveDirectory);
+#endif
     // Initialize the CPU cores
     neocd.initialize();
 

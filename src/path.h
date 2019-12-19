@@ -20,6 +20,10 @@ std::string make_path_separator(const char* path, const char* separator, const c
 
 std::string make_system_path(const char* filename);
 
+#ifdef PORTANDROID
+std::string make_save_path(const char* filename);
+#endif
+
 std::string make_path(const char* path, const char* filename);
 
 bool string_compare_insensitive(const char* a, const char* b);

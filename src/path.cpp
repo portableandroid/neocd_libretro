@@ -73,6 +73,29 @@ std::string make_system_path(const char* filename)
     return std::string(buffer);
 }
 
+#ifdef PORTANDROID
+extern const char* saveDirectory;
+static void save_path_internal(char* buffer, size_t len)
+{
+    if (path_is_empty(saveDirectory))
+        strlcpy(buffer, systemDirectory, len);
+    else
+        strlcpy(buffer, saveDirectory, len);  
+}
+
+std::string make_save_path(const char* filename)
+{
+    char buffer[PATH_MAX_LENGTH];
+
+    save_path_internal(buffer, sizeof(buffer) - 1);
+
+    strlcat(buffer, path_default_slash(), sizeof(buffer) - 1);
+    strlcat(buffer, filename, sizeof(buffer) - 1);
+
+    return std::string(buffer);
+}
+#endif
+
 std::string make_path_separator(const char* path, const char* separator, const char* filename)
 {
     char buffer[PATH_MAX_LENGTH];
