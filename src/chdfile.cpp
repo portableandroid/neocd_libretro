@@ -43,7 +43,7 @@ bool ChdFile::open(const std::string& filename)
         return false;
     }
 
-    m_hunkData = reinterpret_cast<char*>(std::malloc(chdHeader->hunkbytes));
+    m_hunkData = reinterpret_cast<char*>(malloc(chdHeader->hunkbytes));
     if (!m_hunkData)
     {
         close();
@@ -80,7 +80,7 @@ void ChdFile::close()
 
     if (m_hunkData)
     {
-        std::free(m_hunkData);
+        free(m_hunkData);
         m_hunkData = nullptr;
     }
 
