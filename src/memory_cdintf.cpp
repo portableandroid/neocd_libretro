@@ -298,7 +298,7 @@ static void cdInterfaceWriteWord(uint32_t address, uint32_t data)
                     */
 //      LOG(LOG_INFO, "CDROM: Drive reset at PC=%06X\n", m68k_get_reg(NULL, M68K_REG_PPC));
         neocd.cdrom.stop();
-        neocd.lc8951.status = LC8951::CdIdle;
+        neocd.lc8951.controller.status = CdromController::CdIdle;
         break;
 
     case 0x0002:    /*
@@ -318,7 +318,7 @@ static void cdInterfaceWriteWord(uint32_t address, uint32_t data)
     case 0x0004:    /*
                         FF0004: VBL Interrupt Mask
                         0x731
-                        0x700   Unknown.
+                        0x700   HBL
                         0x030   VBL
                         0x001   Unknown, writing zero causes a hard reset.
                     
