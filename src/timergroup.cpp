@@ -19,12 +19,8 @@ void watchdogTimerCallback(Timer* timer, uint32_t userData)
     m68k_pulse_reset();
 }
 
-void vblTimerCallback(Timer* timer, uint32_t userData)
+void vblIrqTimerCallback(Timer* timer, uint32_t userData)
 {
-    // Handle HIRQ_CTRL_VBLANK_LOAD
-    if (neocd.video.hirqControl & Video::HIRQ_CTRL_VBLANK_LOAD)
-        neocd.timers.hirqTimer->arm(timer->delay() + Timer::pixelToMaster(neocd.video.hirqRegister + 1));
-
     // Set VBL IRQ to run
     if (neocd.isVBLEnabled())
     {
@@ -41,7 +37,6 @@ void vblTimerCallback(Timer* timer, uint32_t userData)
     else
         neocd.video.autoAnimationFrameCounter--;
 
-    // Set next VBL
     timer->armRelative(Timer::pixelToMaster(Timer::SCREEN_WIDTH * Timer::SCREEN_HEIGHT));
 }
 
@@ -70,6 +65,15 @@ void hirqTimerCallback(Timer* timer, uint32_t userData)
     }
 }
 
+void vblReloadTimerCallback(Timer* timer, uint32_t userData)
+{
+    // Handle HIRQ_CTRL_VBLANK_LOAD
+    if (neocd.video.hirqControl & Video::HIRQ_CTRL_VBLANK_LOAD)
+        neocd.timers.timer<TimerGroup::Hbl>().arm(timer->delay() + Timer::pixelToMaster(neocd.video.hirqRegister + 1));
+
+    timer->armRelative(Timer::pixelToMaster(Timer::SCREEN_WIDTH * Timer::SCREEN_HEIGHT));
+}
+
 void ym2610TimerCallback(Timer* Timer, uint32_t data)
 {
     YM2610TimerOver(data);
@@ -79,10 +83,10 @@ void drawlineTimerCallback(Timer* timer, uint32_t userData)
 {
 //	LOG(LOG_INFO, "Drawline.@ (%d,%d)\n", neocd.getScreenX(), neocd.getScreenY());
 
-    uint32_t scanline = neocd.getScreenY();
+    const uint32_t scanline = neocd.getScreenY();
 
     // Video content is generated between scanlines 16 and 240, see timer.h
-    if ((scanline >= Timer::FIRST_LINE) && (scanline < Timer::VBLANK_LINE))
+    if ((scanline >= Timer::ACTIVE_AREA_TOP) && (scanline < Timer::ACTIVE_AREA_BOTTOM))
     {
         if (!neocd.fastForward)
         {
@@ -92,16 +96,9 @@ void drawlineTimerCallback(Timer* timer, uint32_t userData)
 
                 if (!neocd.video.sprDisable)
                 {
-                    if (scanline & 1)
-                    {
-                        uint16_t activeSprites = neocd.video.createSpriteList(scanline, &neocd.memory.videoRam[0x8680]);
-                        neocd.video.drawSprites(scanline, &neocd.memory.videoRam[0x8680], activeSprites);
-                    }
-                    else
-                    {
-                        uint16_t activeSprites = neocd.video.createSpriteList(scanline, &neocd.memory.videoRam[0x8600]);
-                        neocd.video.drawSprites(scanline, &neocd.memory.videoRam[0x8600], activeSprites);
-                    }
+                    const size_t address = (scanline & 1) ? 0x8680 : 0x8600;
+                    uint16_t activeSprites = neocd.video.createSpriteList(scanline, &neocd.memory.videoRam[address]);
+                    neocd.video.drawSprites(scanline, &neocd.memory.videoRam[address], activeSprites);
                 }
 
                 if (!neocd.video.fixDisable)
@@ -110,40 +107,60 @@ void drawlineTimerCallback(Timer* timer, uint32_t userData)
             else
                 neocd.video.drawBlackLine(scanline);
         }
-    }
 
-    timer->armRelative(Timer::pixelToMaster(Timer::SCREEN_WIDTH));
+        timer->armRelative(Timer::pixelToMaster(Timer::SCREEN_WIDTH));
+    }
+    else if (scanline == Timer::ACTIVE_AREA_BOTTOM)
+        timer->armRelative(Timer::pixelToMaster((Timer::SCREEN_HEIGHT - Timer::ACTIVE_AREA_BOTTOM + Timer::ACTIVE_AREA_TOP) * Timer::SCREEN_WIDTH));
 }
 
-void cdromIRQTimerCallback(Timer* timer, uint32_t userData)
+void cdromTimerCallback(Timer* timer, uint32_t userData)
 {
-    timer->armRelative(neocd.isCDZ() ? (Timer::CDROM_DELAY / 2) : Timer::CDROM_DELAY);
+    // Shortcuts
+    const bool isCDZ = neocd.isCDZ();
+    const bool isPlaying = neocd.cdrom.isPlaying();
+    const bool isData = neocd.cdrom.isData();
+    const bool isDecoderEnabled = neocd.lc8951.isCdDecoderEnabled();
+    const bool isDecoderIRQEnabled = neocd.lc8951.isCdDecoderIRQEnabled();
+    const bool isDecoderIRQPending = neocd.lc8951.isCdDecoderIRQPending();
 
-    if (neocd.cdrom.isPlaying())
+    int32_t delay;
+
+    if (isPlaying)
+    {
+        if (isData)
+            delay = isCDZ ? (Timer::CDROM_150HZ_DELAY) : Timer::CDROM_75HZ_DELAY;
+        else
+            delay = Timer::CDROM_75HZ_DELAY;
+    }
+    else
+        delay = Timer::CDROM_64HZ_DELAY;
+
+    timer->armRelative(delay);
+
+    if (isPlaying)
     {
         neocd.lc8951.sectorDecoded();
         
         // Trigger the CD IRQ1 if needed, this is used when reading data sectors
-        if (neocd.isIRQ1Enabled() && (neocd.lc8951.IFCTRL & LC8951::DECIEN) && !(neocd.lc8951.IFSTAT & LC8951::DECI))
-            neocd.setInterrupt(NeoGeoCD::CdromDecoder);
-        
-        if (neocd.cdrom.isData())
-            neocd.cdzIrq1Divisor = 0;
-        else if (neocd.isCDZ())
+        if (isDecoderEnabled // CD Decoder is enabled
+            && neocd.isCdDecoderIRQEnabled() // CD Decoder IRQ is not masked
+            && isDecoderIRQEnabled // CD Decoder IRQ is enabled
+            && isDecoderIRQPending) // CD Decoder IRQ is pending
         {
-            // If the machine is CDZ head position is updated every 2 interrupts for audio tracks
-            neocd.cdzIrq1Divisor ^= 1;
-        }
+            // This is used to detect CD activity in the main loop
+            neocd.cdSectorDecodedThisFrame = true;
 
-        if (!neocd.cdzIrq1Divisor)
-        {
-            // Update the read position
-            neocd.cdrom.increasePosition();
+            // Trigger the CD Decoder IRQ
+            neocd.setInterrupt(NeoGeoCD::CdromDecoder);
         }
+        
+        // Update the read position
+        neocd.cdrom.increasePosition();
     }
     
     // Trigger the CDROM IRQ2, this is used to send commands packets / receive answer packets.
-    if (neocd.isIRQ2Enabled())
+    if (neocd.isCdCommunicationIRQEnabled())
         neocd.setInterrupt(NeoGeoCD::CdromCommunication);
 
     // Update interrupts
@@ -152,8 +169,6 @@ void cdromIRQTimerCallback(Timer* timer, uint32_t userData)
 
 void audioCommandTimerCallback(Timer* timer, uint32_t userData)
 {
-    uint32_t z80Elapsed;
-
     // Post the audio command to the Z80
     neocd.audioCommand = userData;
     
@@ -163,80 +178,53 @@ void audioCommandTimerCallback(Timer* timer, uint32_t userData)
         // Trigger it
         z80_set_irq_line(INPUT_LINE_NMI, ASSERT_LINE);
         z80_set_irq_line(INPUT_LINE_NMI, CLEAR_LINE);
-
-        // Let the Z80 take the command into account
-        z80Elapsed = Timer::z80ToMaster(z80_execute(Timer::masterToZ80(2000)));
-        neocd.z80TimeSlice -= z80Elapsed;
-        neocd.z80CyclesThisFrame += z80Elapsed;
     }
 }
 
 TimerGroup::TimerGroup() :
-    watchdogTimer(nullptr),
-    vblTimer(nullptr),
-    hirqTimer(nullptr),
-    drawlineTimer(nullptr),
-    cdromIRQTimer(nullptr),
-    ym2610TimerA(nullptr),
-    ym2610TimerB(nullptr),
-    audioCommandTimer(nullptr),
     m_timers()
 {
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
-    m_timers.push_back(Timer());
+    timer<TimerGroup::Watchdog>().setDelay(Timer::WATCHDOG_DELAY);
+    timer<TimerGroup::Watchdog>().setCallback(watchdogTimerCallback);
 
-    int i = 0;
+    timer<TimerGroup::Drawline>().setCallback(drawlineTimerCallback);
 
-    watchdogTimer = &m_timers[i++];
-    watchdogTimer->setDelay(Timer::WATCHDOG_DELAY);
-    watchdogTimer->setCallback(watchdogTimerCallback);
+    timer<TimerGroup::Vbl>().setCallback(vblIrqTimerCallback);
 
-    drawlineTimer = &m_timers[i++];
-    drawlineTimer->setCallback(drawlineTimerCallback);
+    timer<TimerGroup::Hbl>().setCallback(hirqTimerCallback);
 
-    vblTimer = &m_timers[i++];
-    vblTimer->setCallback(vblTimerCallback);
+    timer<TimerGroup::VblReload>().setCallback(vblReloadTimerCallback);
 
-    hirqTimer = &m_timers[i++];
-    hirqTimer->setCallback(hirqTimerCallback);
+    timer<TimerGroup::Cdrom>().setCallback(cdromTimerCallback);
 
-    cdromIRQTimer = &m_timers[i++];
-    cdromIRQTimer->setCallback(cdromIRQTimerCallback);
+    timer<TimerGroup::AudioCommand>().setCallback(audioCommandTimerCallback);
 
-    audioCommandTimer = &m_timers[i++];
-    audioCommandTimer->setCallback(audioCommandTimerCallback);
+    timer<TimerGroup::Ym2610A>().setUserData(0);
+    timer<TimerGroup::Ym2610A>().setCallback(ym2610TimerCallback);
 
-    ym2610TimerA = &m_timers[i++];
-    ym2610TimerA->setUserData(0);
-    ym2610TimerA->setCallback(ym2610TimerCallback);
-
-    ym2610TimerB = &m_timers[i++];
-    ym2610TimerB->setUserData(1);
-    ym2610TimerB->setCallback(ym2610TimerCallback);
+    timer<TimerGroup::Ym2610B>().setUserData(1);
+    timer<TimerGroup::Ym2610B>().setCallback(ym2610TimerCallback);
 }
 
 void TimerGroup::reset()
 {
-    watchdogTimer->setState(Timer::Stopped);
+    timer<TimerGroup::Watchdog>().setState(Timer::Stopped);
 
-    drawlineTimer->arm(Timer::pixelToMaster(Timer::HS_START));
-    vblTimer->arm(Timer::pixelToMaster(Timer::SCREEN_WIDTH * Timer::VBLANK_LINE));
+    timer<TimerGroup::Drawline>().arm(Timer::pixelToMaster((Timer::ACTIVE_AREA_TOP * Timer::SCREEN_WIDTH) + Timer::ACTIVE_AREA_LEFT));
 
-    cdromIRQTimer->arm(neocd.isCDZ() ? (Timer::CDROM_DELAY / 2) : Timer::CDROM_DELAY);
+    timer<TimerGroup::Vbl>().arm(Timer::pixelToMaster((Timer::VBL_IRQ_Y * Timer::SCREEN_WIDTH) + Timer::VBL_IRQ_X));
 
-    hirqTimer->setState(Timer::Stopped);
+    timer<TimerGroup::Hbl>().setState(Timer::Stopped);
 
-    audioCommandTimer->setState(Timer::Stopped);
+    timer<TimerGroup::VblReload>().arm(Timer::pixelToMaster((Timer::VBL_RELOAD_Y * Timer::SCREEN_WIDTH) + Timer::VBL_RELOAD_X));
 
-    ym2610TimerA->setState(Timer::Stopped);
-    ym2610TimerB->setState(Timer::Stopped);
+    timer<TimerGroup::Cdrom>().arm(Timer::CDROM_64HZ_DELAY);
+
+    timer<TimerGroup::AudioCommand>().setState(Timer::Stopped);
+
+    timer<TimerGroup::Ym2610A>().setState(Timer::Stopped);
+
+    timer<TimerGroup::Ym2610B>().setState(Timer::Stopped);
 }
 
 int32_t TimerGroup::timeSlice() const
@@ -260,28 +248,16 @@ void TimerGroup::advanceTime(const int32_t time)
 
 DataPacker& operator<<(DataPacker& out, const TimerGroup& timerGroup)
 {
-    out << *timerGroup.watchdogTimer;
-    out << *timerGroup.vblTimer;
-    out << *timerGroup.hirqTimer;
-    out << *timerGroup.drawlineTimer;
-    out << *timerGroup.cdromIRQTimer;
-    out << *timerGroup.ym2610TimerA;
-    out << *timerGroup.ym2610TimerB;
-    out << *timerGroup.audioCommandTimer;
+    for(const Timer& timer : timerGroup.m_timers)
+        out << timer;
 
     return out;
 }
 
 DataPacker& operator>>(DataPacker& in, TimerGroup& timerGroup)
 {
-    in >> *timerGroup.watchdogTimer;
-    in >> *timerGroup.vblTimer;
-    in >> *timerGroup.hirqTimer;
-    in >> *timerGroup.drawlineTimer;
-    in >> *timerGroup.cdromIRQTimer;
-    in >> *timerGroup.ym2610TimerA;
-    in >> *timerGroup.ym2610TimerB;
-    in >> *timerGroup.audioCommandTimer;
+    for(Timer& timer : timerGroup.m_timers)
+        in >> timer;
 
     return in;
 }
