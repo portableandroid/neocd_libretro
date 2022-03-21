@@ -22,7 +22,6 @@ extern "C"
 {
 #endif /* __cplusplus */
 
-#include <stdio.h>
 #include "codec.h"
 
 /* The function prototypes for the callbacks are basically the same as for
@@ -146,15 +145,8 @@ typedef struct OggVorbis_File {
 
 
 extern int ov_clear(OggVorbis_File *vf);
-extern int ov_fopen(const char *path,OggVorbis_File *vf);
-extern int ov_open(FILE *f,OggVorbis_File *vf,const char *initial,long ibytes);
 extern int ov_open_callbacks(void *datasource, OggVorbis_File *vf,
                 const char *initial, long ibytes, ov_callbacks callbacks);
-
-extern int ov_test(FILE *f,OggVorbis_File *vf,const char *initial,long ibytes);
-extern int ov_test_callbacks(void *datasource, OggVorbis_File *vf,
-                const char *initial, long ibytes, ov_callbacks callbacks);
-extern int ov_test_open(OggVorbis_File *vf);
 
 extern long ov_bitrate(OggVorbis_File *vf,int i);
 extern long ov_bitrate_instant(OggVorbis_File *vf);
