@@ -1,5 +1,7 @@
 STATIC_LINKING := 0
 AR             := ar
+HAVE_CDROM     := 0
+USE_LTO        := 0
 
 ifneq ($(V),1)
    Q := @
@@ -58,11 +60,15 @@ ifneq (,$(findstring unix,$(platform)))
    fpic := -fPIC
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
    LIBS += -lpthread
+   HAVE_CDROM := 1
+   USE_LTO := 1
 else ifeq ($(platform), linux-portable)
    TARGET := $(TARGET_NAME)_libretro.$(EXT)
    fpic := -fPIC -nostdlib
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T
 	LIBM :=
+   HAVE_CDROM := 1
+   USE_LTO := 1
 else ifneq (,$(findstring osx,$(platform)))
    TARGET := $(TARGET_NAME)_libretro.dylib
    fpic := -fPIC
@@ -140,6 +146,15 @@ else ifeq ($(platform), emscripten)
    CFLAGS += -DSYNC_CDROM=1
    CXXFLAGS += -DSYNC_CDROM=1
    STATIC_LINKING = 1
+# DOS
+else ifeq ($(platform), dos)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = i586-pc-msdosdjgpp-gcc
+	AR = i586-pc-msdosdjgpp-ar
+	CXX = i586-pc-msdosdjgpp-g++
+	CFLAGS += -march=i386 -DSYNC_CDROM=1
+	CXXFLAGS += -march=i386 -DSYNC_CDROM=1
+	STATIC_LINKING=1
 else ifeq ($(platform), libnx)
    include $(DEVKITPRO)/libnx/switch_rules
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
@@ -148,6 +163,15 @@ else ifeq ($(platform), libnx)
    CFLAGS += -march=armv8-a -mtune=cortex-a57 -mtp=soft -mcpu=cortex-a57+crc+fp+simd -ffast-math
    CXXFLAGS := $(ASFLAGS) $(CFLAGS)
    STATIC_LINKING = 1
+# PS2
+else ifeq ($(platform), ps2)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = mips64r5900el-ps2-elf-gcc
+	CXX = mips64r5900el-ps2-elf-g++
+	AR = mips64r5900el-ps2-elf-ar
+	CFLAGS += -G0 -DPS2 -DABGR1555 -DSYNC_CDROM=1
+	CXXFLAGS += -G0 -DPS2 -DABGR1555 -DSYNC_CDROM=1
+	STATIC_LINKING=1
 else ifeq ($(platform), vita)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
    CC = arm-vita-eabi-gcc
@@ -186,6 +210,8 @@ else ifeq ($(platform), psl1ght)
    STATIC_LINKING = 1
 else
    CC ?= gcc
+   HAVE_CDROM := 1
+   USE_LTO := 1
    TARGET := $(TARGET_NAME)_libretro.dll
    SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
 endif
@@ -203,8 +229,23 @@ else
    CXXFLAGS += -Ofast -DNDEBUG
 endif
 
-CFLAGS += -DHAVE_ZLIB -D_7ZIP_ST -DHAVE_FLAC
-CXXFLAGS += -std=c++11 -fno-exceptions -fno-rtti
+ifeq ($(HAVE_CDROM), 1)
+   CFLAGS += -DHAVE_CDROM
+   CXXFLAGS += -DHAVE_CDROM
+endif
+
+ifeq ($(USE_LTO), 1)
+   CFLAGS += -flto -fuse-linker-plugin
+   CXXFLAGS += -flto -fuse-linker-plugin
+endif
+
+GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
+ifneq ($(GIT_VERSION)," unknown")
+	CXXFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
+endif
+
+CFLAGS += -DHAVE_ZLIB -D_7ZIP_ST -DHAVE_FLAC -DUSE_LIBRETRO_VFS
+CXXFLAGS += -std=c++11 -fno-exceptions -fno-rtti -DUSE_LIBRETRO_VFS
 
 include Makefile.common
 

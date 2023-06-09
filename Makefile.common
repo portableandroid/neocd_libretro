@@ -78,29 +78,36 @@ SOURCES_C += \
 	$(LIBCHDR_DIR)/src/libchdr_flac.c \
 	$(LIBCHDR_DIR)/src/libchdr_huffman.c
 
-SOURCES_C += \
+SRC_LIBRETRO_COMMON = \
 	$(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \
 	$(LIBRETRO_COMM_DIR)/compat/compat_strcasestr.c \
 	$(LIBRETRO_COMM_DIR)/compat/compat_strl.c \
 	$(LIBRETRO_COMM_DIR)/compat/fopen_utf8.c \
 	$(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c \
 	$(LIBRETRO_COMM_DIR)/encodings/encoding_utf.c \
-	$(LIBRETRO_COMM_DIR)/file/file_path.c \
 	$(LIBRETRO_COMM_DIR)/file/file_path_io.c \
+	$(LIBRETRO_COMM_DIR)/file/file_path.c \
 	$(LIBRETRO_COMM_DIR)/file/retro_dirent.c \
 	$(LIBRETRO_COMM_DIR)/lists/dir_list.c \
 	$(LIBRETRO_COMM_DIR)/lists/file_list.c \
 	$(LIBRETRO_COMM_DIR)/lists/string_list.c \
-	$(LIBRETRO_COMM_DIR)/time/rtime.c \
-	$(LIBRETRO_COMM_DIR)/streams/file_stream.c \
+	$(LIBRETRO_COMM_DIR)/memmap/memalign.c \
 	$(LIBRETRO_COMM_DIR)/streams/file_stream_transforms.c \
-	$(LIBRETRO_COMM_DIR)/streams/trans_stream.c \
+	$(LIBRETRO_COMM_DIR)/streams/file_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_pipe.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_zlib.c \
+	$(LIBRETRO_COMM_DIR)/streams/trans_stream.c \
 	$(LIBRETRO_COMM_DIR)/string/stdstring.c \
+	$(LIBRETRO_COMM_DIR)/time/rtime.c \
 	$(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c
 
-SOURCES_C += \
+ifeq ($(HAVE_CDROM), 1)
+SRC_LIBRETRO_COMMON += \
+	 $(LIBRETRO_COMM_DIR)/cdrom/cdrom.c \
+	 $(LIBRETRO_COMM_DIR)/vfs/vfs_implementation_cdrom.c
+endif
+
+SRC_LIBRETRO_COMMON += \
 	$(LZMA_DIR)/src/Alloc.c \
 	$(LZMA_DIR)/src/Bra86.c \
 	$(LZMA_DIR)/src/BraIA64.c \
