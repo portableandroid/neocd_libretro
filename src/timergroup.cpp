@@ -64,7 +64,7 @@ void hirqTimerCallback(Timer* timer, uint32_t userData)
     // but it's important for line effects in Karnov's Revenge to work correctly.
     if ((neocd->video.hirqControl & Video::HIRQ_CTRL_AUTOREPEAT) && (neocd->video.hirqRegister != 0xFFFFFFFF))
     {
-        constexpr uint32_t MAX_PIXELS = Timer::masterToPixel(std::numeric_limits<int32_t>::max() - 4);
+        uint32_t MAX_PIXELS = Timer::masterToPixel(std::numeric_limits<int32_t>::max() - 4);
         timer->armRelative(Timer::pixelToMaster(std::max(uint32_t(1), std::min(MAX_PIXELS, neocd->video.hirqRegister + 1))));
     }
 }

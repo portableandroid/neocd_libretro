@@ -27,14 +27,21 @@ public:
 
     static constexpr int32_t VBL_RELOAD_X = ACTIVE_AREA_RIGHT - 63;
     static constexpr int32_t VBL_RELOAD_Y = ACTIVE_AREA_BOTTOM;
-
+#ifdef PORTANDROID
+    static constexpr int32_t WATCHDOG_DELAY = (int32_t)(MASTER_CLOCK * 0.13516792);
+    static constexpr int32_t CDROM_64HZ_DELAY = (int32_t)(MASTER_CLOCK / 64.64);
+    static constexpr int32_t CDROM_75HZ_DELAY = (int32_t)(MASTER_CLOCK / 75.0);
+    static constexpr int32_t CDROM_150HZ_DELAY = (int32_t)(MASTER_CLOCK / 150.0);
+    static constexpr double FRAME_RATE = PIXEL_CLOCK / static_cast<double>(SCREEN_WIDTH * SCREEN_HEIGHT);
+    static constexpr int32_t CYCLES_PER_FRAME = (int32_t)((MASTER_CLOCK / PIXEL_CLOCK) * SCREEN_WIDTH * SCREEN_HEIGHT);
+#else
     static constexpr int32_t WATCHDOG_DELAY = round<int32_t>(MASTER_CLOCK * 0.13516792);
     static constexpr int32_t CDROM_64HZ_DELAY = round<int32_t>(MASTER_CLOCK / 64.64);
     static constexpr int32_t CDROM_75HZ_DELAY = round<int32_t>(MASTER_CLOCK / 75.0);
     static constexpr int32_t CDROM_150HZ_DELAY = round<int32_t>(MASTER_CLOCK / 150.0);
-
     static constexpr double FRAME_RATE = PIXEL_CLOCK / static_cast<double>(SCREEN_WIDTH * SCREEN_HEIGHT);
     static constexpr int32_t CYCLES_PER_FRAME = round<int32_t>((MASTER_CLOCK / PIXEL_CLOCK) * SCREEN_WIDTH * SCREEN_HEIGHT);
+#endif
 
     typedef void(*Callback)(Timer* timer, uint32_t userData);
 
@@ -97,7 +104,7 @@ public:
         return round<int32_t>(static_cast<double>(value) / (MASTER_CLOCK / Z80_CLOCK));
     }
 
-    static inline constexpr int32_t masterToPixel(int32_t value)
+    static inline int32_t masterToPixel(int32_t value)
     {
         return round<int32_t>(static_cast<double>(value) / (MASTER_CLOCK / PIXEL_CLOCK));
     }
