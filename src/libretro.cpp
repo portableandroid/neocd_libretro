@@ -4,6 +4,7 @@
 
 #include "libretro_backupram.h"
 #include "libretro_bios.h"
+#include "hlebios.h"
 #include "libretro_common.h"
 #include "libretro_input.h"
 #include "libretro_log.h"
@@ -97,13 +98,20 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 {
     std::memset(info, 0, sizeof(retro_system_av_info));
 
+    const auto effectiveWidth = Video::FRAMEBUFFER_WIDTH - (globals.overscanH * 2);
+
     info->timing.fps = Timer::FRAME_RATE;
     info->timing.sample_rate = static_cast<double>(Audio::SAMPLE_RATE);
-    info->geometry.base_width = Video::FRAMEBUFFER_WIDTH;
+    info->geometry.base_width = effectiveWidth;
     info->geometry.base_height = Video::FRAMEBUFFER_HEIGHT;
     info->geometry.max_width = Video::FRAMEBUFFER_WIDTH;
     info->geometry.max_height = Video::FRAMEBUFFER_HEIGHT;
-    info->geometry.aspect_ratio = Video::ASPECT_RATIO;
+    if (globals.aspectRatio == AspectRatio::PAR_45_44)
+        info->geometry.aspect_ratio = effectiveWidth * 45.0f / 44.0f / Video::FRAMEBUFFER_HEIGHT;
+    else if (globals.aspectRatio == AspectRatio::DAR_4_3)
+        info->geometry.aspect_ratio = 4.0f / 3.0f;
+    else // AspectRatio::PAR_1_1
+        info->geometry.aspect_ratio = effectiveWidth / static_cast<float>(Video::FRAMEBUFFER_HEIGHT);
 }
 
 size_t retro_serialize_size(void)
@@ -137,7 +145,21 @@ bool retro_unserialize(const void *data, size_t size)
     DataPacker state(const_cast<char*>(reinterpret_cast<const char*>(data)), size, size);
 
     if (neocd->restoreState(state))
+    {
+        // The disc's track times describe what is in the drive, not
+        // where the machine has got to, and a state restores the memory
+        // they live in. A state saved before they were written down
+        // would otherwise put the empty table back.
+        if (neocd->usingHleBios)
+            HleBios::buildTrackTable();
+
+        // The fix character usage map describes fix memory, and fix
+        // memory was just replaced wholesale; recompute rather than
+        // trust whatever the session had.
+        neocd->video.updateFixUsageMap();
+
         return true;
+    }
 
     Libretro::Bios::load();
     neocd->initialize();
@@ -184,6 +206,16 @@ bool retro_load_game(const struct retro_game_info *info)
 
     // Set libretro memory maps
     Libretro::Memmap::init();
+
+    // Savestates here are complete, deterministic, fixed-size within a
+    // session, and safe to move between instances of the core - which
+    // is what saying nothing here fails to promise. Frontends gate
+    // rewind and run-ahead on this promise, conservatively refusing
+    // features the states have supported all along when it is absent.
+    {
+        uint64_t quirks = 0;
+        libretro.environment(RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS, &quirks);
+    }
 
     return true;
 }
@@ -270,7 +302,10 @@ void retro_run(void)
 
     // Send audio and video to the frontend
     libretro.audioBatch(reinterpret_cast<const int16_t*>(&neocd->audio.buffer.ymSamples[0]), neocd->audio.buffer.sampleCount);
-    libretro.video(neocd->video.frameBuffer, Video::FRAMEBUFFER_WIDTH, Video::FRAMEBUFFER_HEIGHT, Video::FRAMEBUFFER_WIDTH * sizeof(uint16_t));
+    libretro.video(neocd->video.frameBuffer + globals.overscanH,
+                   Video::FRAMEBUFFER_WIDTH - (globals.overscanH * 2),
+                   Video::FRAMEBUFFER_HEIGHT,
+                   Video::FRAMEBUFFER_WIDTH * sizeof(uint16_t));
 }
 
 void retro_init(void)
@@ -312,32 +347,4 @@ void retro_deinit(void)
         delete neocd;
         neocd = nullptr;
     }
-
-#ifdef PROFILE_ENABLED
-    Libretro::Log::message(RETRO_LOG_DEBUG, "Total frame time: %f ms\n", g_profilingAccumulators[ProfilingCategory::Total]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, " CD audio decoding: %f ms\n", g_profilingAccumulators[ProfilingCategory::AudioCD]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, " YM2610 generation and sound mixing: %f ms\n", g_profilingAccumulators[ProfilingCategory::AudioYM2610]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, " M68K emulation: %f ms\n", g_profilingAccumulators[ProfilingCategory::CpuM68K]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, " Z80 emulation: %f ms\n", g_profilingAccumulators[ProfilingCategory::CpuZ80]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, " Drawing video and handling IRQ: %f ms\n", g_profilingAccumulators[ProfilingCategory::VideoAndIRQ]);
-    Libretro::Log::message(RETRO_LOG_DEBUG, "Time spent polling inputs: %f ms\n", g_profilingAccumulators[ProfilingCategory::InputPolling]);
-
-    g_profilingAccumulatorsInitialized = false;
-#endif
 }
-
-// stdlibc++ on VITA references usleep but it's not available.
-// This is a workaround
-#ifdef VITA
-extern "C" int usleep(useconds_t usec)
-{
-   sceKernelDelayThread(usec);
-   return 0;
-}
-
-extern "C" unsigned int sleep(unsigned int seconds)
-{
-   sceKernelDelayThread(seconds * 1000000LL);
-   return 0;
-}
-#endif

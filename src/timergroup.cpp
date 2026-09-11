@@ -6,12 +6,11 @@
 #include "libretro_common.h"
 #include "libretro_log.h"
 #include "neogeocd.h"
-#include "round.h"
 #include "timergroup.h"
 
 extern "C"
 {
-    #include "3rdparty/musashi/m68kcpu.h"
+    #include "3rdparty/musashi/m68kcpu.h" // IWYU pragma: keep
 }
 
 void watchdogTimerCallback(Timer* timer, uint32_t userData)
@@ -47,8 +46,7 @@ void vblIrqTimerCallback(Timer* timer, uint32_t userData)
 void hirqTimerCallback(Timer* timer, uint32_t userData)
 {
     // Trigger horizontal interrupt if enabled
-    if ((neocd->video.hirqControl & Video::HIRQ_CTRL_ENABLE)
-        && neocd->isHBLEnabled())
+    if ((neocd->video.hirqControl & Video::HIRQ_CTRL_ENABLE) && neocd->isHBLEnabled())
     {
 /*		Libretro::Log::message(RETRO_LOG_DEBUG, "Horizontal IRQ.@ (%d,%d), next drawline in : %d\n",
             neocd->getScreenX(),
@@ -72,8 +70,28 @@ void hirqTimerCallback(Timer* timer, uint32_t userData)
 void vblReloadTimerCallback(Timer* timer, uint32_t userData)
 {
     // Handle HIRQ_CTRL_VBLANK_LOAD
-    if (neocd->video.hirqControl & Video::HIRQ_CTRL_VBLANK_LOAD)
-        neocd->timers.timer<TimerGroup::Hbl>().arm(timer->delay() + Timer::pixelToMaster(neocd->video.hirqRegister + 1));
+    //
+    // This is the third of the three places the raster timer is armed
+    // from the counter register, and it was the last one still running
+    // the plus-one over a parked counter. A game that wants the timer
+    // quiet writes 0xFFFFFFFF; the one carried that to zero, zero
+    // pixels is zero master cycles, and the timer fired at the reload
+    // point of every frame with an interrupt the hardware never
+    // raises. The auto-repeat path above has guarded this value for
+    // years and the load-on-write path in memory_video.cpp now does
+    // too.
+    //
+    // The clamp is the other half of the same arithmetic.
+    // pixelToMaster() takes a signed 32-bit pixel count, so a register
+    // near the top of its range converts to a delay that does not fit;
+    // and unlike the auto-repeat path, which arms relative to now,
+    // this delay is added to the reload timer's own before it is
+    // armed, so it clamps to the bound that leaves room for that sum.
+    if ((neocd->video.hirqControl & Video::HIRQ_CTRL_VBLANK_LOAD)
+        && (neocd->video.hirqRegister != 0xFFFFFFFF))
+        neocd->timers.timer<TimerGroup::Hbl>().arm(timer->delay()
+            + Timer::pixelToMaster(std::min(HIRQ_MAX_PIXELS,
+                                            neocd->video.hirqRegister + 1)));
 
     timer->armRelative(Timer::pixelToMaster(Timer::SCREEN_WIDTH * Timer::SCREEN_HEIGHT));
 }
@@ -89,27 +107,53 @@ void drawlineTimerCallback(Timer* timer, uint32_t userData)
 
     const uint32_t scanline = neocd->getScreenY();
 
-    // Video content is generated between scanlines 16 and 240, see timer.h
-    if ((scanline >= Timer::ACTIVE_AREA_TOP) && (scanline < Timer::ACTIVE_AREA_BOTTOM))
+    if (!neocd->fastForward)
     {
-        if (!neocd->fastForward)
+        /* The video chip builds a line's sprites two lines before it
+           shows them, into one of a pair of line buffers, and what a
+           game writes to its sprites mid-frame lands on screen with
+           that delay. Sprites are drawn here when the chip would draw
+           them; the fix layer and the backdrop belong to the displayed
+           line. A flag per buffer remembers whether the line ahead was
+           built at all - video switched on within those two lines
+           shows the backdrop, as the chip's empty buffer would.
+        */
+        static bool builtAhead[2] = { false, false };
+
+        // What the displayed line shows.
+        if ((scanline >= Timer::ACTIVE_AREA_TOP) && (scanline < Timer::ACTIVE_AREA_BOTTOM))
         {
             if (neocd->video.videoEnable)
             {
-                neocd->video.drawEmptyLine(scanline);
-
-                if (!neocd->video.sprDisable)
-                {
-                    const size_t address = (scanline & 1) ? 0x8680 : 0x8600;
-                    uint16_t activeSprites = neocd->video.createSpriteList(scanline, &neocd->memory.videoRam[address]);
-                    neocd->video.drawSprites(scanline, &neocd->memory.videoRam[address], activeSprites);
-                }
+                if (!builtAhead[scanline & 1])
+                    neocd->video.drawEmptyLine(scanline);
 
                 if (!neocd->video.fixDisable)
                     neocd->video.drawFix(scanline);
             }
             else
                 neocd->video.drawBlackLine(scanline);
+        }
+
+        // What the chip builds ahead.
+        const uint32_t renderLine = scanline + 2;
+
+        if ((renderLine >= Timer::ACTIVE_AREA_TOP) && (renderLine < Timer::ACTIVE_AREA_BOTTOM))
+        {
+            if (neocd->video.videoEnable)
+            {
+                neocd->video.drawEmptyLine(renderLine);
+
+                if (!neocd->video.sprDisable)
+                {
+                    const size_t address = (renderLine & 1) ? 0x8680 : 0x8600;
+                    neocd->video.renderScanlineSprites(renderLine, &neocd->memory.videoRam[address]);
+                }
+
+                builtAhead[renderLine & 1] = true;
+            }
+            else
+                builtAhead[renderLine & 1] = false;
         }
     }
 

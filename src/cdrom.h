@@ -16,6 +16,7 @@
 #include "datapacker.h"
 #include "file.h"
 #include "flacfile.h"
+#include "mp3file.h"
 #include "oggfile.h"
 #include "trackindex.h"
 #include "wavfile.h"
@@ -73,6 +74,15 @@ public:
      * @brief Get a pointer to the TocEntry of the current track
      */
     const CdromToc::Entry* currentTrack() const;
+
+    /**
+     * @brief The disc's table of contents
+     */
+    const CdromToc& toc() const
+    {
+        return m_toc;
+    }
+
     
     /**
      * @brief Get the TrackIndex of the current track
@@ -268,17 +278,6 @@ protected:
     /// Set to true to have the audio thread stop
     bool m_exitFlag;
 
-#ifndef SYNC_CDROM
-    /// Audio decoder worker thread
-    std::thread m_workerThread;
-
-    /// Mutex to access the circular buffer
-    std::mutex m_workerMutex;
-
-    /// Condition variable to notify when more data is available
-    std::condition_variable m_workerConditionVariable;
-#endif
-
     /// The currently opened image cd image file
     AbstractFile* m_file;
 
@@ -291,6 +290,9 @@ protected:
 
     /// OGG file decoder
     OggFile m_oggFile;
+
+    /// MP3 file reader
+    Mp3File m_mp3File;
 
     /// WAV file decoder
     WavFile m_wavFile;

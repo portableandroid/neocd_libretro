@@ -7,6 +7,7 @@
 #include "flacfile.h"
 #include "libretro_log.h"
 #include "misc.h"
+#include "mp3file.h"
 #include "oggfile.h"
 #include "path.h"
 #include "wavfile.h"
@@ -111,8 +112,11 @@ bool CdromToc::loadCueSheet(const std::string &filename)
             std::string type = match[2].str();
             bool isBinary = string_compare_insensitive(type.c_str(), "BINARY");
             bool isWave = string_compare_insensitive(type.c_str(), "WAVE");
+            // Rips with MP3 tracks declare the type as MP3 rather than
+            // WAVE, which is what the sheet means by "not raw sectors".
+            bool isMp3 = string_compare_insensitive(type.c_str(), "MP3");
 
-            if (!isBinary && !isWave)
+            if (!isBinary && !isWave && !isMp3)
             {
                 Libretro::Log::message(RETRO_LOG_ERROR, "File type %s is not supported.\n", type.c_str());
                 return false;
@@ -486,11 +490,11 @@ bool  CdromToc::loadChd(const std::string& filename)
         bool v2Metadata = true;
 
         // First, try to read V2 metadata
-        std::string metadata = chd.metadata(CDROM_TRACK_METADATA2_TAG, idx);
+        std::string metadata = chd.metadata(RCHD_META_CDROM_TRACK2, idx);
         if (metadata.empty())
         {
             // If that failed, try the old format
-            metadata = chd.metadata(CDROM_TRACK_METADATA_TAG, idx);
+            metadata = chd.metadata(RCHD_META_CDROM_TRACK, idx);
             v2Metadata = false;
         }
 
@@ -531,7 +535,7 @@ bool  CdromToc::loadChd(const std::string& filename)
         trackLength = std::stoul(match[4].str());
 
         // Find the track type
-        std::string trackTypeStr = match[2];
+        const std::string trackTypeStr = match[2];
 
         if (string_compare_insensitive(trackTypeStr.c_str(), "MODE1"))
             trackType = TrackType::Mode1_2048;
@@ -549,6 +553,9 @@ bool  CdromToc::loadChd(const std::string& filename)
             return false;
         }
 
+        const std::string pgTypeStr = match[6];
+        const bool isVAudio = string_compare_insensitive(pgTypeStr.c_str(), "VAUDIO");
+
         // Make the CHD position a multiple of 4
         if (chdPosition % 4)
             chdPosition += 4 - (chdPosition % 4);
@@ -559,7 +566,8 @@ bool  CdromToc::loadChd(const std::string& filename)
             m_toc.push_back({ -1, { static_cast<uint8_t>(trackNumber), 0 }, TrackType::Silence, 0, cdPosition, 0, pregapLength });
 
             // CHD WEIRDNESS: If the previous track was data don't move the chd position
-            if (!previousWasData)
+            // But do it if PGTYPE indicates 'VAUDIO' (newer CHDs)
+            if (!previousWasData || isVAudio)
             {
                 chdPosition += pregapLength;
 
@@ -660,6 +668,23 @@ bool CdromToc::findAudioFileSize(const std::string& path, File &file, int64_t &f
         trackType = TrackType::AudioFlac;
 
         flacFile.cleanup();
+
+        return true;
+    }
+    else if (string_compare_insensitive(extension.c_str(), "MP3"))
+    {
+        Mp3File mp3File;
+
+        if (!mp3File.initialize(&file))
+        {
+            Libretro::Log::message(RETRO_LOG_ERROR, "File %s%s is not a valid MP3 file.", filename.c_str(), extension.c_str());
+            return false;
+        }
+
+        fileSize = static_cast<int64_t>(mp3File.length());
+        trackType = TrackType::AudioMp3;
+
+        mp3File.cleanup();
 
         return true;
     }

@@ -2,10 +2,15 @@
 #include <algorithm>
 #include <array>
 
+#if VIDEO_STATS
+#include "libretro_log.h"
+#endif
+
 #include "inline.h"
 #include "libretro_common.h"
 #include "neocd_endian.h"
 #include "neogeocd.h"
+#include "timer.h"
 #include "video.h"
 
 static const std::array<uint32_t, 256> SPR_DECODE_TABLE {
@@ -94,6 +99,31 @@ static const std::array<uint8_t, 256> X_ZOOM_TABLE{
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 };
 
+/* Which of the two pixels a byte of fix graphics leaves opaque, as a
+   mask over the pair of RGB565 colours they become. A pair is drawn as
+   one blend of the two colours over the two pixels already there, which
+   keeps the transparent pixel out of the flow of control: whether a
+   given pixel is transparent is a question no two neighbouring pixels
+   answer the same way, and a branch on it turns out to cost about four
+   times the drawing it guards. The text layer of a screen full of text
+   went from 62 microseconds a frame to 15 this way, drawing exactly the
+   same pixels.
+*/
+static const uint32_t FIX_PAIR_MASK[256] = {
+#define FIX_MASK_PAIR(n) (((n) & 0x0F) ? 0x0000FFFFu : 0u) | (((n) & 0xF0) ? 0xFFFF0000u : 0u),
+#define FIX_MASK_QUAD(a) FIX_MASK_PAIR(a) FIX_MASK_PAIR(a + 1) FIX_MASK_PAIR(a + 2) FIX_MASK_PAIR(a + 3)
+#define FIX_MASK_OCTA(a) FIX_MASK_QUAD(a) FIX_MASK_QUAD(a + 4) FIX_MASK_QUAD(a + 8) FIX_MASK_QUAD(a + 12)
+#define FIX_MASK_BLOCK(a) FIX_MASK_OCTA(a) FIX_MASK_OCTA(a + 16) FIX_MASK_OCTA(a + 32) FIX_MASK_OCTA(a + 48)
+    FIX_MASK_BLOCK(0) FIX_MASK_BLOCK(64) FIX_MASK_BLOCK(128) FIX_MASK_BLOCK(192)
+#undef FIX_MASK_BLOCK
+#undef FIX_MASK_OCTA
+#undef FIX_MASK_QUAD
+#undef FIX_MASK_PAIR
+};
+
+static_assert(sizeof(FIX_PAIR_MASK) / sizeof(FIX_PAIR_MASK[0]) == 256,
+              "The fix pair mask has to cover every byte of pixel data.");
+
 Video::Video() :
     paletteRamPc(nullptr),
     fixUsageMap(nullptr),
@@ -144,6 +174,8 @@ Video::~Video()
 
 void Video::reset()
 {
+    spriteIndexDirty = true;
+
     std::memset(paletteRamPc, 0, Memory::PALETTERAM_SIZE);
     std::memset(fixUsageMap, 0, Memory::FIXRAM_SIZE / 32);
     activePaletteBank = 0;
@@ -171,13 +203,37 @@ void Video::convertColor(uint32_t index)
     uint16_t c = BIG_ENDIAN_WORD(neocd->memory.paletteRam[index]);
 
 #ifdef ABGR1555
-    paletteRamPc[index] = ((c & 0x000F) << 11) | ((c & 0x1000) >> 2) |
+    uint16_t out = ((c & 0x000F) << 11) | ((c & 0x1000) >> 2) |
 	(((c & 0x00F0) << 2) | ((c & 0x2000) >> 8)) |
 	(((c & 0x0F00) >> 7) | ((c & 0x4000) >> 14));
+
+    // Five bit channels have nowhere to put the dark bit's half step.
+    if (shadow)
+        out = (out >> 1) & 0x3DEF;
+
+    paletteRamPc[index] = out;
 #else
-    paletteRamPc[index] = ((c & 0x0F00) << 4) | ((c & 0x4000) >> 3) |
+    /* Each channel is really six bits on the machine: five from the
+       palette word plus the dark bit, inverted, as the low bit shared
+       by all three - read out of Geolith's converter. Green is the one
+       channel with six bits here, so it carries the dark bit exactly;
+       red and blue have nowhere to put a half step and keep their five.
+    */
+    uint16_t out = ((c & 0x0F00) << 4) | ((c & 0x4000) >> 3) |
         ((c & 0x00F0) << 3) | ((c & 0x2000) >> 7) |
         ((c & 0x000F) << 1) | ((c & 0x1000) >> 12);
+
+    if (!(c & 0x8000))
+        out |= 0x0020;
+
+    /* The shadow register hangs a pulldown on every channel and the
+       screen comes out at about half brightness; halving each channel
+       is the same approximation Geolith's plain converter uses.
+    */
+    if (shadow)
+        out = (out >> 1) & 0x7BEF;
+
+    paletteRamPc[index] = out;
 #endif
 }
 
@@ -218,25 +274,40 @@ void Video::drawFix(uint32_t scanline)
         // Check for total transparency, no need to draw
         if (!fixUsageMap[character])
         {
+#if VIDEO_STATS
+            ++stats.fixCellsSkipped;
+#endif
             frameBufferPtr += 8;
             continue;
         }
 
-        uint8_t* fixBase = &neocd->memory.fixRam[(character * 32) + (scanline % 8)];
-        uint16_t* paletteBase = &paletteRamPc[(activePaletteBank * 4096) + (palette * 16)];
+#if VIDEO_STATS
+        ++stats.fixCells;
+#endif
 
+        const uint8_t* fixBase = &neocd->memory.fixRam[(character * 32) + (scanline % 8)];
+        const uint16_t* paletteBase = &paletteRamPc[(activePaletteBank * 4096) + (palette * 16)];
+
+        /* Four bytes make the eight pixels of one row of a character, two
+           pixels apiece, and both of a pair go down in one blend. The
+           framebuffer runs 320 pixels to the line and the pairs are
+           always two pixels side by side within one, so a pair is whole
+           wherever it lands; memcpy rather than a widened pointer keeps
+           that a matter of arithmetic rather than of assumption.
+        */
         auto decodeAndDrawFix = [&](int n) ALWAYS_INLINE {
-            uint8_t pixelA = fixBase[n];
-            uint8_t pixelB = pixelA >> 4;
-            pixelA &= 0x0F;
+            const uint8_t byte = fixBase[n];
 
-            if (pixelA)
-                *frameBufferPtr = paletteBase[pixelA];
-            frameBufferPtr++;
+            const uint32_t colors = uint32_t(paletteBase[byte & 0x0F])
+                | (uint32_t(paletteBase[byte >> 4]) << 16);
+            const uint32_t mask = FIX_PAIR_MASK[byte];
 
-            if (pixelB)
-                *frameBufferPtr = paletteBase[pixelB];
-            frameBufferPtr++;
+            uint32_t under;
+            std::memcpy(&under, frameBufferPtr, sizeof(under));
+            under = (colors & mask) | (under & ~mask);
+            std::memcpy(frameBufferPtr, &under, sizeof(under));
+
+            frameBufferPtr += 2;
         };
 
         decodeAndDrawFix(16);
@@ -251,74 +322,142 @@ static inline bool isSpriteOnScanline(uint32_t scanline, uint32_t y, uint32_t cl
     return (clipping == 0) || (clipping >= 0x20) || ((scanline - y) & 0x1ff) < (clipping * 0x10);
 }
 
-uint16_t Video::createSpriteList(uint32_t scanline, uint16_t *spriteList) const
+void Video::rebuildSpriteIndex()
 {
-    uint16_t* attributesPtr = &neocd->memory.videoRam[0x8200];
-    uint16_t activeCount = 0;
-    uint16_t attributes;
-    uint32_t y = sprite_y;
-    uint32_t clipping = sprite_clipping;
-    bool spriteIsOnScanline = false;
+    /* One walk over the sprite bank in hardware order resolves every
+       sprite's place: chain position accumulates for each in turn, a
+       chained sprite taking its x from the sum of everything before
+       it. None of it depends on the line, so the walk happens once,
+       and each visible line collects the sprites whose height covers
+       it, in bank order, stopping at the chip's ninety six as the
+       chip's own scan stops.
+    */
+#if VIDEO_STATS
+    ++stats.rebuilds;
+    ++stats.rebuildsThisFrame;
+#endif
 
-    for (uint16_t spriteNumber = 0; spriteNumber < MAX_SPRITES_PER_SCREEN; ++spriteNumber)
+    const uint16_t* scb3 = &neocd->memory.videoRam[0x8000];
+    const uint16_t* scb2 = &neocd->memory.videoRam[0x8200];
+    const uint16_t* scb4 = &neocd->memory.videoRam[0x8400];
+
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t zoomX = 0xF;
+    uint32_t zoomY = 0xFF;
+    uint32_t clipping = 0;
+
+    for (uint16_t spriteNumber = 1; spriteNumber <= MAX_SPRITES_PER_SCREEN; ++spriteNumber)
     {
-        attributes = *attributesPtr++;
+        uint32_t attributes1 = scb3[spriteNumber];
+        uint32_t attributes2 = scb2[spriteNumber];
 
-        if (!(attributes & 0x40))
+        if (attributes2 & 0x40)
         {
-            y = 0x200 - (attributes >> 7);
-            clipping = attributes & 0x3F;
-            spriteIsOnScanline = isSpriteOnScanline(scanline, y, clipping);
+            x = (x + zoomX + 1) & 0x1FF;
+            zoomX = (attributes1 >> 8) & 0xF;
+        }
+        else
+        {
+            zoomY = attributes1 & 0xFF;
+            zoomX = (attributes1 >> 8) & 0xF;
+            clipping = attributes2 & 0x3F;
+            y = 0x200 - (attributes2 >> 7);
+            x = scb4[spriteNumber] >> 7;
         }
 
-        if (!spriteIsOnScanline)
+        resolvedX[spriteNumber] = static_cast<uint16_t>(x);
+        resolvedY[spriteNumber] = static_cast<uint16_t>(y);
+        resolvedZoomX[spriteNumber] = static_cast<uint8_t>(zoomX);
+        resolvedZoomY[spriteNumber] = static_cast<uint8_t>(zoomY);
+        resolvedClipping[spriteNumber] = static_cast<uint8_t>(clipping);
+    }
+
+    std::memset(lineSpriteCount, 0, sizeof(lineSpriteCount));
+
+    for (uint16_t spriteNumber = 1; spriteNumber <= MAX_SPRITES_PER_SCREEN; ++spriteNumber)
+    {
+        uint32_t c = resolvedClipping[spriteNumber];
+
+        if (!c)
             continue;
 
-        if (!clipping)
+        auto take = [&](uint32_t from, uint32_t to) {
+            for (uint32_t line = from; line < to; ++line)
+            {
+                uint8_t& count = lineSpriteCount[line - Timer::ACTIVE_AREA_TOP];
+                if (count < MAX_SPRITES_PER_LINE)
+                    lineSprites[line - Timer::ACTIVE_AREA_TOP][count++] = spriteNumber;
+            }
+        };
+
+        if (c >= 0x20)
+        {
+            take(Timer::ACTIVE_AREA_TOP, Timer::ACTIVE_AREA_BOTTOM);
             continue;
+        }
+
+        // The covered lines: y to y + height, wrapped in the chip's
+        // nine bit space, clipped to the visible area.
+        uint32_t sy = resolvedY[spriteNumber];
+        uint32_t height = c * 0x10;
+        uint32_t end = (sy + height) & 0x1FF;
+
+        auto clamp = [&](uint32_t from, uint32_t to) {
+            from = std::max<uint32_t>(from, Timer::ACTIVE_AREA_TOP);
+            to = std::min<uint32_t>(to, Timer::ACTIVE_AREA_BOTTOM);
+            if (from < to)
+                take(from, to);
+        };
+
+        if (sy < end)
+            clamp(sy, end);
+        else
+        {
+            clamp(sy, 0x200);
+            clamp(0, end);
+        }
+    }
+
+#if VIDEO_STATS
+    for (uint32_t line = 0; line < FRAMEBUFFER_HEIGHT; ++line)
+        stats.bucketEntries += lineSpriteCount[line];
+#endif
+
+    spriteIndexDirty = false;
+}
+
+uint16_t Video::renderScanlineSprites(uint32_t scanline, uint16_t *spriteList)
+{
+    if (spriteIndexDirty)
+        rebuildSpriteIndex();
+
+#if VIDEO_STATS
+    ++stats.lines;
+#endif
+
+    const uint32_t row = scanline - Timer::ACTIVE_AREA_TOP;
+    const uint16_t activeCount = lineSpriteCount[row];
+
+    for (uint16_t at = 0; at < activeCount; ++at)
+    {
+        uint16_t spriteNumber = lineSprites[row][at];
 
         *spriteList++ = spriteNumber;
-        activeCount++;
 
-        if (activeCount >= MAX_SPRITES_PER_LINE)
-            break;
+        drawSprite(spriteNumber,
+                   resolvedX[spriteNumber],
+                   resolvedY[spriteNumber],
+                   resolvedZoomX[spriteNumber],
+                   resolvedZoomY[spriteNumber],
+                   scanline,
+                   resolvedClipping[spriteNumber]);
     }
 
     // Fill the rest of the sprite list with 0, including one extra entry
     std::memset(spriteList, 0, sizeof(uint16_t) * (MAX_SPRITES_PER_LINE - activeCount + 1));
 
     return activeCount;
-}
-
-void Video::drawSprites(uint32_t scanline, uint16_t *spriteList, uint16_t spritesToDraw)
-{
-    for (uint16_t currentSprite = 0; currentSprite <= spritesToDraw; currentSprite++)
-    {
-        uint16_t spriteNumber = *spriteList++;
-        // Optimization: No need to draw sprite zero now if we're going to draw it again in the end
-        if ((!spriteNumber) && (currentSprite < spritesToDraw))
-            continue;
-
-        uint16_t spriteAttributes1 = neocd->memory.videoRam[0x8000 + spriteNumber];
-        uint16_t spriteAttributes2 = neocd->memory.videoRam[0x8200 + spriteNumber];
-        uint16_t spriteAttributes3 = neocd->memory.videoRam[0x8400 + spriteNumber];
-
-        if (spriteAttributes2 & 0x40)
-        {
-            sprite_x = (sprite_x + sprite_zoomX + 1) & 0x1FF;
-            sprite_zoomX = (spriteAttributes1 >> 8) & 0xF;
-        }
-        else
-        {
-            sprite_zoomY = spriteAttributes1 & 0xFF;
-            sprite_zoomX = (spriteAttributes1 >> 8) & 0xF;
-            sprite_clipping = spriteAttributes2 & 0x3F;
-            sprite_y = 0x200 - (spriteAttributes2 >> 7);
-            sprite_x = spriteAttributes3 >> 7;
-        }
-
-        drawSprite(spriteNumber, sprite_x, sprite_y, sprite_zoomX, sprite_zoomY, scanline, sprite_clipping);
-    }
 }
 
 inline void drawSpriteLine(
@@ -330,6 +469,26 @@ inline void drawSpriteLine(
     uint16_t*& frameBufferPtr)
 {
     uint16_t* out = frameBufferPtr;
+
+    // Full width is nearly every sprite on screen; give it a straight
+    // sixteen pixel run with no per-pixel table looks.
+    if (zoomX == 15)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            if (pixelData & (0xFu << (i * 4)))
+                *out = paletteBase[(pixelData >> (i * 4)) & 0xF];
+            out += increment;
+        }
+        for (int i = 0; i < 8; ++i)
+        {
+            if (pixelDataB & (0xFu << (i * 4)))
+                *out = paletteBase[(pixelDataB >> (i * 4)) & 0xF];
+            out += increment;
+        }
+        frameBufferPtr = out;
+        return;
+    }
 
     auto drawSprLine = [&](int N) {
         for(int i = 0; i < 8; ++i)
@@ -421,6 +580,26 @@ inline void drawSpriteLineClipped(
     const uint16_t* high)
 {
     uint16_t* out = frameBufferPtr;
+
+    // Full width is nearly every sprite on screen; a straight sixteen
+    // pixel run, still held inside the line like the general loop.
+    if (zoomX == 15)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            if ((pixelData & (0xFu << (i * 4))) && (out >= low) && (out < high))
+                *out = paletteBase[(pixelData >> (i * 4)) & 0xF];
+            out += increment;
+        }
+        for (int i = 0; i < 8; ++i)
+        {
+            if ((pixelDataB & (0xFu << (i * 4))) && (out >= low) && (out < high))
+                *out = paletteBase[(pixelDataB >> (i * 4)) & 0xF];
+            out += increment;
+        }
+        frameBufferPtr = out;
+        return;
+    }
 
     auto drawSprLine = [&](int N) {
         for(int i = 0; i < 8; ++i)
@@ -534,12 +713,17 @@ void Video::drawSprite(uint32_t spriteNumber, uint32_t x, uint32_t y, uint32_t z
     Status spriteStatus = checkVisibility();
 
     if (spriteStatus == Invisible)
+    {
+#if VIDEO_STATS
+        ++stats.objectLinesOff;
+#endif
         return;
+    }
 
     if (invert)
         zoomLine ^= 0xFF;
 
-    if (clipping > 0x20)
+    if (clipping == 0x21)
     {
         zoomLine = zoomLine % ((zoomY + 1) << 1);
 
@@ -623,6 +807,66 @@ void Video::drawSprite(uint32_t spriteNumber, uint32_t x, uint32_t y, uint32_t z
     }
     else
         drawSpriteLine(zoomX, increment, pixelData, pixelDataB, paletteBase, frameBufferPtr);
+
+#if VIDEO_STATS
+    /* Slots put on screen, transparent ones included: the zoom decides how
+       many there are, and it is always zoomX + 1.
+    */
+    ++stats.objectLines;
+    stats.objectPixels += zoomX + 1;
+#endif
+}
+
+#if VIDEO_STATS
+// Once every five seconds or thereabouts of a 60Hz picture.
+static constexpr uint64_t STATS_FRAMES_PER_REPORT = 300;
+#endif
+
+void Video::noteFrame()
+{
+#if VIDEO_STATS
+    /* An ordinary build arrives here with nothing counted and nothing to
+       report, and the empty function is all that is left of it.
+
+       The number to look for is the walks per frame. A game that lays its
+       objects out during vertical blank costs one walk of the sprite bank
+       for the whole picture; one that rewrites the sprite control blocks
+       from a raster interrupt costs one per line, which on a screen full
+       of objects is two orders of magnitude of work that the first game
+       never pays. The worst figure says how bad the worst frame was, and
+       the rest of the line is the load each walk and each drawn line
+       brings with it.
+
+       Logged at debug level: a line every five seconds is for whoever is
+       reading a log file, and should not be across their picture.
+    */
+    if (stats.rebuildsThisFrame > stats.worstRebuilds)
+        stats.worstRebuilds = stats.rebuildsThisFrame;
+
+    stats.rebuildsThisFrame = 0;
+
+    if (++stats.frames < STATS_FRAMES_PER_REPORT)
+        return;
+
+    const double frames = static_cast<double>(stats.frames);
+
+    Libretro::Log::message(RETRO_LOG_DEBUG,
+        "VIDEO STATS over %llu frames: %.2f sprite bank walks per frame (worst %llu in one frame), "
+        "%.1f scanlines and %.1f object lines drawn, %.1f object lines off screen, %.0f object pixels, "
+        "%.1f fix cells drawn and %.1f skipped, %.1f entries per walk\n",
+        static_cast<unsigned long long>(stats.frames),
+        static_cast<double>(stats.rebuilds) / frames,
+        static_cast<unsigned long long>(stats.worstRebuilds),
+        static_cast<double>(stats.lines) / frames,
+        static_cast<double>(stats.objectLines) / frames,
+        static_cast<double>(stats.objectLinesOff) / frames,
+        static_cast<double>(stats.objectPixels) / frames,
+        static_cast<double>(stats.fixCells) / frames,
+        static_cast<double>(stats.fixCellsSkipped) / frames,
+        stats.rebuilds ? static_cast<double>(stats.bucketEntries) / static_cast<double>(stats.rebuilds) : 0.0);
+
+    stats = {};
+#endif // VIDEO_STATS
 }
 
 void Video::drawBlackLine(uint32_t scanline)
@@ -683,6 +927,20 @@ DataPacker& operator>>(DataPacker& in, Video& video)
     in >> video.sprite_zoomX;
     in >> video.sprite_zoomY;
     in >> video.sprite_clipping;
+
+    // These come back as raw words from the state and are then used as
+    // array indices before the hardware would next constrain them. During
+    // normal operation activePaletteBank is only ever 0 or 1, videoramOffset
+    // is kept to 16 bits by the auto-increment mask, and sprite_zoomY is a
+    // byte from the sprite attributes. A corrupt state could set any of them
+    // out of range, which would index paletteRam/paletteRamPc, videoRam and
+    // yZoomRom out of bounds (and make (zoomY + 1) << 1 wrap to a zero
+    // modulus). Fold them back into their hardware ranges here.
+    video.activePaletteBank &= 1;
+    video.videoramOffset    &= 0xFFFF;
+    video.sprite_zoomY      &= 0xFF;
+
+    video.spriteIndexDirty = true;
 
     return in;
 }

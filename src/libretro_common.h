@@ -27,6 +27,13 @@ struct BiosListEntry
     Bios::Type type;
 };
 
+namespace AspectRatio
+{
+    static constexpr uint32_t PAR_1_1 = 0;
+    static constexpr uint32_t PAR_45_44 = 1;
+    static constexpr uint32_t DAR_4_3 = 2;
+};
+
 struct Globals
 {
     // Version number of the notification interface
@@ -56,7 +63,17 @@ struct Globals
     // Should we patch the BIOS to lower CPU usage during loading
     bool cdSpeedHack{ false };
 
+    // Pixels of horizontal overscan hidden on each side of the picture
+    uint32_t overscanH{ 8 };
+
+    // 68000 overclock, in percent of the stock clock. 100 is stock.
+    uint32_t cpuOverclock{ 100 };
+
+    // If true will create a memory card file for each game
     bool perContentSaves{ false };
+
+    // Aspect ratio setting (0 = 1:1 PAR, 1 = 45:44 PAR, 2 = 4:3 DAR)
+    uint32_t aspectRatio{ AspectRatio::PAR_1_1 };
 };
 
 extern LibretroCallbacks libretro;

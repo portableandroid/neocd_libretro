@@ -5,6 +5,7 @@
 #include "round.h"
 
 #include <cstdint>
+#include <limits>
 
 class Timer
 {
@@ -27,21 +28,13 @@ public:
 
     static constexpr int32_t VBL_RELOAD_X = ACTIVE_AREA_RIGHT - 63;
     static constexpr int32_t VBL_RELOAD_Y = ACTIVE_AREA_BOTTOM;
-#ifdef PORTANDROID
-    static constexpr int32_t WATCHDOG_DELAY = (int32_t)(MASTER_CLOCK * 0.13516792);
-    static constexpr int32_t CDROM_64HZ_DELAY = (int32_t)(MASTER_CLOCK / 64.64);
-    static constexpr int32_t CDROM_75HZ_DELAY = (int32_t)(MASTER_CLOCK / 75.0);
-    static constexpr int32_t CDROM_150HZ_DELAY = (int32_t)(MASTER_CLOCK / 150.0);
+
+    static constexpr int32_t WATCHDOG_DELAY = round<int32_t, double>(MASTER_CLOCK * 0.13516792);
+    static constexpr int32_t CDROM_64HZ_DELAY = round<int32_t, double>(MASTER_CLOCK / 64.64);
+    static constexpr int32_t CDROM_75HZ_DELAY = round<int32_t, double>(MASTER_CLOCK / 75.0);
+    static constexpr int32_t CDROM_150HZ_DELAY = round<int32_t, double>(MASTER_CLOCK / 150.0);
     static constexpr double FRAME_RATE = PIXEL_CLOCK / static_cast<double>(SCREEN_WIDTH * SCREEN_HEIGHT);
-    static constexpr int32_t CYCLES_PER_FRAME = (int32_t)((MASTER_CLOCK / PIXEL_CLOCK) * SCREEN_WIDTH * SCREEN_HEIGHT);
-#else
-    static constexpr int32_t WATCHDOG_DELAY = round<int32_t>(MASTER_CLOCK * 0.13516792);
-    static constexpr int32_t CDROM_64HZ_DELAY = round<int32_t>(MASTER_CLOCK / 64.64);
-    static constexpr int32_t CDROM_75HZ_DELAY = round<int32_t>(MASTER_CLOCK / 75.0);
-    static constexpr int32_t CDROM_150HZ_DELAY = round<int32_t>(MASTER_CLOCK / 150.0);
-    static constexpr double FRAME_RATE = PIXEL_CLOCK / static_cast<double>(SCREEN_WIDTH * SCREEN_HEIGHT);
-    static constexpr int32_t CYCLES_PER_FRAME = round<int32_t>((MASTER_CLOCK / PIXEL_CLOCK) * SCREEN_WIDTH * SCREEN_HEIGHT);
-#endif
+    static constexpr int32_t CYCLES_PER_FRAME = round<int32_t, double>((MASTER_CLOCK / PIXEL_CLOCK) * SCREEN_WIDTH * SCREEN_HEIGHT);
 
     typedef void(*Callback)(Timer* timer, uint32_t userData);
 
@@ -71,7 +64,7 @@ public:
 
     static inline constexpr int32_t secondsToMaster(double value)
     {
-        return round<int32_t>(value * MASTER_CLOCK);
+      return round<int32_t, double>(value * MASTER_CLOCK);
     }
 
     static inline constexpr double masterToSeconds(int32_t value)
@@ -81,32 +74,32 @@ public:
 
     static inline constexpr int32_t m68kToMaster(int32_t value)
     {
-       return round<int32_t>(static_cast<double>(value) * (MASTER_CLOCK / M68K_CLOCK));
+       return round<int32_t,double>(static_cast<double>(value) * (MASTER_CLOCK / M68K_CLOCK));
     }
 
     static inline constexpr int32_t z80ToMaster(int32_t value)
     {
-        return round<int32_t>(static_cast<double>(value) * (MASTER_CLOCK / Z80_CLOCK));
+        return round<int32_t,double>(static_cast<double>(value) * (MASTER_CLOCK / Z80_CLOCK));
     }
 
     static inline constexpr int32_t pixelToMaster(int32_t value)
     {
-        return round<int32_t>(static_cast<double>(value) * (MASTER_CLOCK / PIXEL_CLOCK));
+        return round<int32_t,double>(static_cast<double>(value) * (MASTER_CLOCK / PIXEL_CLOCK));
     }
 
     static inline constexpr int32_t masterToM68k(int32_t value)
     {
-        return round<int32_t>(static_cast<double>(value) / (MASTER_CLOCK / M68K_CLOCK));
+        return round<int32_t,double>(static_cast<double>(value) / (MASTER_CLOCK / M68K_CLOCK));
     }
 
     static inline constexpr int32_t masterToZ80(int32_t value)
     {
-        return round<int32_t>(static_cast<double>(value) / (MASTER_CLOCK / Z80_CLOCK));
+        return round<int32_t,double>(static_cast<double>(value) / (MASTER_CLOCK / Z80_CLOCK));
     }
 
     static inline int32_t masterToPixel(int32_t value)
     {
-        return round<int32_t>(static_cast<double>(value) / (MASTER_CLOCK / PIXEL_CLOCK));
+        return round<int32_t,double>(static_cast<double>(value) / (MASTER_CLOCK / PIXEL_CLOCK));
     }
 
     friend DataPacker& operator<<(DataPacker& out, const Timer& timer);
@@ -123,5 +116,15 @@ protected:
 
 DataPacker& operator<<(DataPacker& out, const Timer& timer);
 DataPacker& operator>>(DataPacker& in, Timer& timer);
+
+/* The largest pixel count that can be converted to master cycles and
+   then added to a delay a timer is already carrying without leaving
+   int32_t. Both paths that arm the raster timer as an offset from an
+   existing delay clamp the counter register to this; the headroom is
+   a frame, which is the most either of them can be adding to. */
+static uint32_t HIRQ_MAX_PIXELS = static_cast<uint32_t>(
+    Timer::masterToPixel(std::numeric_limits<int32_t>::max()
+                         - Timer::pixelToMaster(Timer::SCREEN_WIDTH * Timer::SCREEN_HEIGHT)
+                         - 4));
 
 #endif // TIMER_H

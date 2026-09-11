@@ -94,16 +94,7 @@ extern "C" {
 enum
 {
 	M68K_CPU_TYPE_INVALID,
-	M68K_CPU_TYPE_68000,
-	M68K_CPU_TYPE_68010,
-	M68K_CPU_TYPE_68EC020,
-	M68K_CPU_TYPE_68020,
-	M68K_CPU_TYPE_68EC030,
-	M68K_CPU_TYPE_68030,
-	M68K_CPU_TYPE_68EC040,
-	M68K_CPU_TYPE_68LC040,
-	M68K_CPU_TYPE_68040,
-	M68K_CPU_TYPE_SCC68070
+	M68K_CPU_TYPE_68000
 };
 
 /* Registers used by m68k_get_reg() and m68k_set_reg() */
@@ -131,12 +122,6 @@ typedef enum
 	M68K_REG_SP,		/* The current Stack Pointer (located in A7) */
 	M68K_REG_USP,		/* User Stack Pointer */
 	M68K_REG_ISP,		/* Interrupt Stack Pointer */
-	M68K_REG_MSP,		/* Master Stack Pointer */
-	M68K_REG_SFC,		/* Source Function Code */
-	M68K_REG_DFC,		/* Destination Function Code */
-	M68K_REG_VBR,		/* Vector Base Register */
-	M68K_REG_CACR,		/* Cache Control Register */
-	M68K_REG_CAAR,		/* Cache Address Register */
 
 	/* Assumed registers */
 	/* These are cheat registers which emulate the 1-longword prefetch
@@ -302,8 +287,7 @@ void m68k_set_instr_hook_callback(void  (*callback)(unsigned int pc));
 /* ======================================================================== */
 
 /* Use this function to set the CPU type you want to emulate.
- * Currently supported types are: M68K_CPU_TYPE_68000, M68K_CPU_TYPE_68010,
- * M68K_CPU_TYPE_EC020, and M68K_CPU_TYPE_68020.
+ * The only supported type is M68K_CPU_TYPE_68000.
  */
 void m68k_set_cpu_type(unsigned int cpu_type);
 
@@ -390,16 +374,6 @@ unsigned int m68k_disassemble(char* str_buff, unsigned int pc, unsigned int cpu_
  * via the read/write interfaces.
  */
 unsigned int m68k_disassemble_raw(char* str_buff, unsigned int pc, const unsigned char* opdata, const unsigned char* argdata, unsigned int cpu_type);
-
-
-/* ======================================================================== */
-/* ============================== MAME STUFF ============================== */
-/* ======================================================================== */
-
-#if M68K_COMPILE_FOR_MAME == OPT_ON
-#include "m68kmame.h"
-#endif /* M68K_COMPILE_FOR_MAME */
-
 
 /* ======================================================================== */
 /* ============================== END OF FILE ============================= */

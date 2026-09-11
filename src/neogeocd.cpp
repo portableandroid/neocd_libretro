@@ -2,12 +2,12 @@
 
 #include "3rdparty/ym/ym2610.h"
 #include "3rdparty/z80/z80.h"
-#include "m68kintf.h"
+#include "hlebios.h"
+#include "libretro_common.h"
 #include "neogeocd.h"
-#include "timeprofiler.h"
+#include "3rdparty/musashi/m68k.h"
 #include "timer.h"
 #include "z80intf.h"
-#include "libretro_log.h"
 
 extern "C"
 {
@@ -33,12 +33,14 @@ NeoGeoCD::NeoGeoCD() :
     pendingInterrupts(0),
     remainingCyclesThisFrame(0),
     z80TimeSlice(0),
+    cpuOverclockCarry(0),
     z80Disable(true),
     z80NMIDisable(true),
-    currentTimeSeconds(0.0),
+    currentTimeCycles(0),
     audioCommand(0),
     audioResult(0),
-    biosType(Bios::Unknown)
+    biosType(Bios::Unknown),
+    usingHleBios(false)
 {
     // Create the worker thread to buffer & decode audio data
     cdrom.createWorkerThread();
@@ -55,6 +57,7 @@ void NeoGeoCD::initialize()
     // Initialize the 68000 emulation core
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_init();
+
 
     // Inizialize the z80 core
     z80_init(0, Timer::Z80_CLOCK, NULL, z80_irq_callback);
@@ -88,9 +91,10 @@ void NeoGeoCD::reset()
     irqMask2 = 0;
     remainingCyclesThisFrame = 0;
     z80TimeSlice = 0;
+    cpuOverclockCarry = 0;
     z80Disable = true;
     z80NMIDisable = true;
-    currentTimeSeconds = 0.0;
+    currentTimeCycles = 0;
     fastForward = false;
     audioCommand = 0;
     audioResult = 0;
@@ -100,23 +104,66 @@ void NeoGeoCD::reset()
     YM2610Reset();
 }
 
+static bool g_m68kMidSlice = false;
+
+int32_t NeoGeoCD::midSliceElapsed() const
+{
+    if (!g_m68kMidSlice)
+        return 0;
+
+    int32_t elapsed = Timer::m68kToMaster(m68k_cycles_run());
+    uint32_t overclock = globals.cpuOverclock;
+
+    // Under overclock the processor's cycles cover proportionally less
+    // of the frame, and the beam must not run ahead of the wall clock.
+    if (overclock != 100)
+        elapsed = (int32_t)(((int64_t)elapsed * 100) / overclock);
+
+    return elapsed;
+}
+
 void NeoGeoCD::runOneFrame()
 {
-    PROFILE(p_total, ProfilingCategory::Total);
 
     remainingCyclesThisFrame += Timer::CYCLES_PER_FRAME;
 
-    PROFILE(p_audioCD, ProfilingCategory::AudioCD);
     audio.initFrame();
-    PROFILE_END(p_audioCD);
 
     while (remainingCyclesThisFrame > 0)
     {
         uint32_t timeSlice = std::min(timers.timeSlice(), remainingCyclesThisFrame);
+        uint32_t overclock = globals.cpuOverclock;
+        int32_t  request   = Timer::masterToM68k(timeSlice);
+        uint32_t elapsed;
 
-        PROFILE(p_m68k, ProfilingCategory::CpuM68K);
-        uint32_t elapsed = Timer::m68kToMaster(m68k_execute(Timer::masterToM68k(timeSlice)));
-        PROFILE_END(p_m68k);
+        if (overclock != 100)
+            request = std::max(INT32_C(1), (int32_t)(((int64_t)request * overclock) / 100));
+
+        g_m68kMidSlice = true;
+        int32_t executed = m68k_execute(request);
+        g_m68kMidSlice = false;
+
+        if (overclock != 100)
+        {
+            // Exact accounting: the processor ran executed cycles at
+            // overclock/100 times the stock rate, so it consumed
+            // executed * 100 / overclock of wall time. The division
+            // remainder is carried so no time is created or lost over
+            // the long run. The carry stays out of the saved state -
+            // it is a fraction of a cycle - but it lives with the rest
+            // of the frame accounting so that reset clears it and a
+            // restore begins from zero.
+            uint64_t t = (uint64_t)Timer::m68kToMaster(executed) * 100
+                       + cpuOverclockCarry;
+            elapsed = (uint32_t)(t / overclock);
+            cpuOverclockCarry = (uint32_t)(t % overclock);
+
+            if (!elapsed && executed > 0)
+                elapsed = 1;
+        }
+        else
+            elapsed = Timer::m68kToMaster(executed);
+
 
         z80TimeSlice += elapsed;
         if (z80TimeSlice > 0)
@@ -126,26 +173,23 @@ void NeoGeoCD::runOneFrame()
             if (z80Disable)
                 z80Elapsed = z80TimeSlice;
             else
-            {
-                PROFILE(p_z80, ProfilingCategory::CpuZ80);
                 z80Elapsed = Timer::z80ToMaster(z80_execute(Timer::masterToZ80(z80TimeSlice)));
-                PROFILE_END(p_z80);
-            }
 
             z80TimeSlice -= z80Elapsed;
         }
 
         remainingCyclesThisFrame -= elapsed;
-        currentTimeSeconds += Timer::masterToSeconds(elapsed);
+        currentTimeCycles += (uint64_t)elapsed;
 
-        PROFILE(p_videoIRQ, ProfilingCategory::VideoAndIRQ);
         timers.advanceTime(elapsed);
-        PROFILE_END(p_videoIRQ);
     }
 
-    PROFILE(p_audioYM2610, ProfilingCategory::AudioYM2610);
     audio.finalize();
-    PROFILE_END(p_audioYM2610);
+
+    /* Where the frame's counts, if this is a build that takes them, get
+       their look at; in any other build the call asks for nothing.
+    */
+    video.noteFrame();
 }
 
 void NeoGeoCD::setInterrupt(NeoGeoCD::Interrupt interrupt)
@@ -218,9 +262,9 @@ int32_t NeoGeoCD::z80CyclesRun() const
    return z80TimeSlice - Timer::z80ToMaster(z80_ICount);
 }
 
-double NeoGeoCD::z80CurrentTimeSeconds() const
+uint64_t NeoGeoCD::z80CurrentTimeCycles() const
 {
-    return currentTimeSeconds + Timer::masterToSeconds(z80CyclesRun());
+    return currentTimeCycles + (uint64_t)z80CyclesRun();
 }
 
 int32_t NeoGeoCD::z80CyclesThisFrame() const
@@ -244,10 +288,15 @@ bool NeoGeoCD::saveState(DataPacker& out) const
     out << z80TimeSlice;
     out << z80Disable;
     out << z80NMIDisable;
-    out << currentTimeSeconds;
+    out << currentTimeCycles;
     out << audioCommand;
     out << audioResult;
     out << biosType;
+
+    // The stand-in BIOS's own state machine. Saved whether or not it is
+    // in use, so a state is the same size either way; under a real BIOS
+    // these are the idle values.
+    HleBios::saveState(out);
 
     // M68K
     out << m68ki_cpu;
@@ -295,20 +344,38 @@ bool NeoGeoCD::restoreState(DataPacker& in)
     in >> z80TimeSlice;
     in >> z80Disable;
     in >> z80NMIDisable;
-    in >> currentTimeSeconds;
+    in >> currentTimeCycles;
     in >> audioCommand;
     in >> audioResult;
     in >> biosType;
 
+    HleBios::restoreState(in);
+
     // M68K
     in >> m68ki_cpu;
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+    // The whole core struct is restored from the state, including its host
+    // callback pointers. m68k_set_cpu_type above already restores the two
+    // cycle-table pointers; clear every callback so a stale or hostile state
+    // can never leave one pointing at an address of its choosing. The four
+    // in the middle are unused in this build's config, but are cleared too
+    // so enabling one later cannot turn a restore into an arbitrary call.
     m68ki_cpu.int_ack_callback = nullptr;
     m68ki_cpu.bkpt_ack_callback = nullptr;
     m68ki_cpu.reset_instr_callback = nullptr;
+    m68ki_cpu.cmpild_instr_callback = nullptr;
+    m68ki_cpu.rte_instr_callback = nullptr;
+    m68ki_cpu.tas_instr_callback = nullptr;
+    m68ki_cpu.illg_instr_callback = nullptr;
     m68ki_cpu.pc_changed_callback = nullptr;
     m68ki_cpu.set_fc_callback = nullptr;
     m68ki_cpu.instr_hook_callback = nullptr;
+
+    // The overclock remainder is not in the state and must not be
+    // inherited from whatever was running before the restore: a state
+    // has to resume the same way every time it is loaded, which rewind
+    // depends on more than anything.
+    cpuOverclockCarry = 0;
 
     // Z80
     in >> Z80;
